@@ -95,15 +95,73 @@ arguments or values.
 `./sandbox` needs your user to be able to run `docker`. Pick one:
 
 **Rootless Docker (recommended).** Docker runs as your user, so the
-container never has real root on the host. One-time setup:
+container never has real root on the host. Root inside the container is
+your own unprivileged user outside it. It runs alongside a normal system
+Docker without affecting it.
 
-```bash
-sudo apt install uidmap                # the only step that needs root
-dockerd-rootless-setuptool.sh install
-systemctl --user enable --now docker
-loginctl enable-linger                 # keep it running when you log out
-docker context use rootless
-```
+### Setting up rootless Docker
+
+These are the steps used on an Ubuntu 20.04 host with Docker 28 installed
+from Docker's apt repository. Only step 2 needs root.
+
+1. **Check your user has a subordinate ID range.** Rootless Docker maps the
+   container's users into this range. Most distributions create it when the
+   user is added:
+
+   ```bash
+   grep "^$USER:" /etc/subuid /etc/subgid
+   # /etc/subuid:you:296608:65536
+   # /etc/subgid:you:296608:65536
+   ```
+
+   If either line is missing, an admin can add one with
+   `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>`,
+   using a range that doesn't overlap anyone else's.
+
+2. **Install `uidmap`** (as root). It provides `newuidmap` and
+   `newgidmap`:
+
+   ```bash
+   sudo apt-get install -y uidmap
+   ```
+
+3. **Install rootless Docker for your user** (as you, no sudo). The tool
+   comes with Docker's packages. `check` lists anything still missing;
+   `install` sets up a `docker.service` user unit, starts it, and creates a
+   `rootless` CLI context:
+
+   ```bash
+   dockerd-rootless-setuptool.sh check
+   dockerd-rootless-setuptool.sh install
+   ```
+
+   If `dockerd-rootless-setuptool.sh` isn't found, install Docker's
+   `docker-ce-rootless-extras` package.
+
+4. **Start it at boot and use it by default:**
+
+   ```bash
+   systemctl --user enable --now docker
+   loginctl enable-linger
+   docker context use rootless
+   ```
+
+   Lingering starts your user services at boot and keeps them running
+   after you log out. Some tools ignore Docker contexts. If one can't find
+   Docker, also set
+   `export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock`.
+
+5. **Check it:**
+
+   ```bash
+   docker info --format '{{json .SecurityOptions}}'   # should include "name=rootless"
+   docker run --rm hello-world
+   ```
+
+Rootless Docker can only enforce per-container memory and CPU limits on
+cgroup v2. Check with `docker info --format '{{.CgroupVersion}}'`. On
+cgroup v1, leave out `container.memory` and `container.cpus`, and see
+[Limiting the whole account](#limiting-the-whole-account) instead.
 
 **The `docker` group.** Simpler, but anyone in that group is effectively
 root on the host:
@@ -114,6 +172,51 @@ sudo usermod -aG docker "$USER"        # then log out and back in
 
 With `container.user: auto` (the default), `./sandbox` detects which one you
 have and picks the container user to match.
+
+## Limiting the whole account
+
+You can cap the CPU, memory and number of processes for everything a user
+account runs. Running the sandbox under a dedicated account makes this
+especially useful. It's also the only way to limit resources with rootless
+Docker on cgroup v1.
+
+systemd puts each user's services and logins in a slice named
+`user-<uid>.slice`. With rootless Docker, the Docker daemon and every
+container live inside that slice, along with your other user services and
+SSH sessions. Cron jobs don't: they run under the system's `cron.service`,
+so they aren't covered.
+
+Set limits as root. They're saved and survive reboots:
+
+```bash
+uid=$(id -u <user>)
+
+# cgroup v2 (docker info shows CgroupVersion 2)
+sudo systemctl set-property user-$uid.slice MemoryMax=6G CPUQuota=200% TasksMax=4096
+
+# cgroup v1
+sudo systemctl set-property user-$uid.slice MemoryLimit=6G CPUQuota=200% TasksMax=4096
+```
+
+- `CPUQuota=200%` means at most two CPU cores' worth of time.
+- `MemoryMax` / `MemoryLimit` is a hard cap. When it's reached, the kernel
+  kills processes inside the slice.
+- `TasksMax` caps processes and threads.
+
+Check the limits took effect:
+
+```bash
+systemctl show user-$uid.slice -p MemoryMax -p MemoryLimit -p CPUQuotaPerSecUSec -p TasksMax
+cat /sys/fs/cgroup/memory/user.slice/user-$uid.slice/memory.limit_in_bytes   # cgroup v1
+cat /sys/fs/cgroup/user.slice/user-$uid.slice/memory.max                     # cgroup v2
+```
+
+To see where a process sits, run `cat /proc/<pid>/cgroup`. Remove the limits
+with `sudo systemctl revert user-$uid.slice`.
+
+The limit is shared by everything in the slice. If the agent uses up the
+memory, your other services under that account can be the ones killed.
+Running the sandbox under its own account avoids that.
 
 ## Quick start
 
@@ -147,7 +250,7 @@ a shared list of service names.
 | `permission_mode` | `bypassPermissions` | Claude's permission mode inside the container. |
 | `claude_code_version` | `latest` | npm version of Claude Code to install. |
 | `container.user` | `auto` | `auto`, or `uid:gid`. |
-| `container.memory`, `container.cpus` | unlimited | Resource limits. |
+| `container.memory`, `container.cpus` | unlimited | Resource limits. Rootless Docker needs cgroup v2 for these. |
 | `container.apt_packages`, `container.python_packages` | `[]` | Extra packages baked into the image. |
 | `container.environment` | `{}` | Extra environment variables. |
 | `paths.state` | `./data/state` | The container's home: Claude login, settings, history. |
@@ -325,6 +428,9 @@ systemd user service:
   Usually it isn't logged in yet: run `./sandbox login`.
 - **Files in `data/` are owned by an odd uid**: set `container.user`
   explicitly. On rootless Docker it should be `0:0`, which maps to you.
+- **Errors about memory or CPU limits on rootless Docker**: rootless Docker
+  can only enforce limits on cgroup v2. If `docker info` shows
+  `Cgroup Version: 1`, remove `container.memory` and `container.cpus`.
 
 ## Development
 
