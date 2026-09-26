@@ -1,0 +1,114 @@
+# claude-sandbox configuration.
+# Copy to config.yaml, edit, then run ./sandbox setup.
+# Relative paths are relative to this file. Top-level keys starting with "x-"
+# are ignored, so you can use them to hold YAML anchors (see x-services).
+
+# Remote Control environment name shown in the Claude app. Also names the
+# container and the systemd units: lowercase letters, digits and dashes.
+name: my-server
+
+# Default model for new sessions. Remove to use Claude Code's default.
+model: claude-opus-5-5
+
+# Permission mode inside the container. The container is the security
+# boundary, so by default the agent doesn't stop to ask before each command.
+# One of: default, acceptEdits, plan, bypassPermissions.
+permission_mode: bypassPermissions
+
+# Claude Code version to install: "latest" or a pinned version like "2.1.283".
+claude_code_version: latest
+
+container:
+  # "auto": root inside the container on rootless Docker (which maps to your
+  # host user), otherwise your host uid:gid. Or set "uid:gid" yourself.
+  user: auto
+  memory: 4g
+  cpus: 2
+  # Extra Debian packages and Python packages to install in the image.
+  apt_packages: []
+  python_packages: [requests, python-dotenv]
+  # Extra environment variables for the container.
+  environment: {}
+
+paths:
+  state: ./data/state          # Claude login, settings and history (the container's $HOME)
+  workspace: ./data/workspace  # the agent's working directory, /workspace
+  queue: ./data/queue          # the host action queue and audit log
+
+# Host directories to expose inside the container. Read-only unless mode: rw.
+# Don't mount a directory the host runs code from (cron scripts, services)
+# as rw: the agent could then run code on the host by editing it. Have the
+# agent work on its own clones and use a `deploy` action instead.
+mounts: []
+#  - host: ~/logs
+#    container: /mnt/logs
+#    mode: ro
+
+git:
+  # Private key the agent uses for git over SSH, mounted read-only.
+  # Use a deploy key or a dedicated account, not your personal key.
+  ssh_key: null
+  name: Claude Sandbox
+  email: claude-sandbox@localhost
+
+broker:
+  timeout_seconds: 60          # per action, unless the action sets its own
+  max_output_bytes: 65536      # output kept per result (the end is kept)
+  max_request_bytes: 262144
+  result_retention_days: 7
+  # Optional Discord webhook URL, pinged when a request needs approval.
+  approval_webhook_url: null
+
+x-services: &services [my-bot]
+x-projects: &projects [my-bot]
+
+# Actions the agent may ask the host to run, with `hostctl <action> name=value`.
+#
+# command:  the exact argv to run, with no shell. {name} is replaced with a
+#           validated argument; {home} is your home directory.
+# args:     every argument must be one of:
+#             choices: [a, b]              a string from this list
+#             integer: {min: 1, max: 10}   a whole number in range
+#             text: {max_bytes: 20000}     free text, only allowed as stdin
+#           Add `default:` to make an argument optional.
+# stdin:    name of a text argument to pipe to the command.
+# approval: true to hold the request until you run ./sandbox approve <id>.
+# timeout:  seconds, overriding broker.timeout_seconds.
+actions:
+  status:
+    description: Show a service's status.
+    command: [systemctl, --user, status, "{service}", --no-pager]
+    args:
+      service: {choices: *services}
+
+  logs:
+    description: Show a service's recent log lines.
+    command: [journalctl, --user, -u, "{service}", -n, "{lines}", --no-pager]
+    args:
+      service: {choices: *services}
+      lines: {integer: {min: 1, max: 1000}, default: 100}
+
+  restart:
+    description: Restart a service.
+    command: [systemctl, --user, restart, "{service}"]
+    args:
+      service: {choices: *services}
+
+  deploy:
+    description: Fast-forward a project's live checkout to its remote branch.
+    command: [git, -C, "{home}/{project}", pull, --ff-only]
+    args:
+      project: {choices: *projects}
+    approval: true
+
+  crontab-show:
+    description: Show the host user's crontab.
+    command: [crontab, -l]
+
+  crontab-install:
+    description: Replace the host user's crontab with the given content.
+    command: [crontab, "-"]
+    args:
+      content: {text: {max_bytes: 20000}}
+    stdin: content
+    approval: true

@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Ask the host to run an allowlisted action and wait for the result.
+
+  hostctl list                      show allowed actions and mounts
+  hostctl <action> [name=value ...] queue an action (value "@path" reads a file)
+  hostctl result <id>               show the result of an earlier request
+
+Exit codes: 0 ok, 1 failed/rejected/denied/timed out, 2 usage error,
+3 waiting for approval, 4 no result yet.
+"""
+import json
+import os
+import secrets
+import sys
+import time
+from datetime import datetime
+
+QUEUE = os.environ.get("HOSTCTL_QUEUE", "/queue")
+CATALOG = os.path.join(QUEUE, "results", "_catalog.json")
+EXIT_CODES = {"ok": 0, "pending": 3}
+
+
+def usage(message=None):
+    if message:
+        print(f"hostctl: {message}", file=sys.stderr)
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+def load_catalog():
+    try:
+        with open(CATALOG) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def new_id():
+    return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
+
+
+def submit(action, args):
+    req_id = new_id()
+    tmp = os.path.join(QUEUE, "inbox", "tmp", f"{req_id}.json")
+    final = os.path.join(QUEUE, "inbox", "requests", f"{req_id}.json")
+    with open(tmp, "w") as f:
+        json.dump({"action": action, "args": args}, f)
+    os.replace(tmp, final)
+    return req_id
+
+
+def read_result(req_id):
+    path = os.path.join(QUEUE, "results", f"{req_id}.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def wait_for(req_id, timeout):
+    deadline = time.monotonic() + timeout
+    delay = 0.2
+    while time.monotonic() < deadline:
+        result = read_result(req_id)
+        if result is not None:
+            return result
+        time.sleep(delay)
+        delay = min(delay * 1.5, 2.0)
+    return None
+
+
+def report(result):
+    status = result.get("status")
+    if result.get("output"):
+        sys.stdout.write(result["output"])
+        if not result["output"].endswith("\n"):
+            sys.stdout.write("\n")
+    if status != "ok":
+        detail = result.get("error") or result.get("message") or ""
+        code = result.get("exit_code")
+        suffix = f" (exit {code})" if code is not None else ""
+        print(f"hostctl: {result['id']}: {status}{suffix}{': ' + detail if detail else ''}", file=sys.stderr)
+    return EXIT_CODES.get(status, 1)
+
+
+def cmd_list(catalog):
+    print(f"Host actions for {catalog.get('name')}:\n")
+    for name, info in sorted(catalog.get("actions", {}).items()):
+        flag = "  [needs approval]" if info.get("approval") else ""
+        print(f"  {name}{flag}")
+        if info.get("description"):
+            print(f"      {info['description']}")
+        for arg, spec in info.get("args", {}).items():
+            kind = spec["type"]
+            if kind == "choices":
+                detail = "one of: " + ", ".join(spec["choices"])
+            elif kind == "integer":
+                bounds = [f"{k} {spec[k]}" for k in ("min", "max") if k in spec]
+                detail = "integer" + (f" ({', '.join(bounds)})" if bounds else "")
+            else:
+                detail = f"text up to {spec['max_bytes']} bytes (use {arg}=@file)"
+            default = f" [default {spec['default']}]" if "default" in spec else ""
+            print(f"      {arg}=  {detail}{default}")
+    mounts = catalog.get("mounts") or []
+    if mounts:
+        print("\nHost directories mounted in this container:")
+        for m in mounts:
+            print(f"  {m['path']} ({m['mode']})")
+    return 0
+
+
+def parse_args(pairs):
+    args = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"expected name=value, got {pair!r}")
+        key, value = pair.split("=", 1)
+        if value.startswith("@"):
+            with open(value[1:]) as f:
+                value = f.read()
+        args[key] = value
+    return args
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        return usage()
+    catalog = load_catalog()
+    if catalog is None:
+        print("hostctl: the host broker hasn't published its action list yet "
+              f"({CATALOG} missing). Ask the host admin to run `./sandbox setup`.", file=sys.stderr)
+        return 1
+
+    command, rest = argv[0], argv[1:]
+    if command == "list":
+        return cmd_list(catalog)
+    if command == "result":
+        if len(rest) != 1:
+            return usage("result takes one id")
+        result = read_result(rest[0])
+        if result is None:
+            print(f"hostctl: no result for {rest[0]} yet", file=sys.stderr)
+            return 4
+        return report(result)
+
+    info = catalog.get("actions", {}).get(command)
+    if info is None:
+        return usage(f"unknown action {command!r}; run `hostctl list`")
+    try:
+        args = parse_args(rest)
+    except (ValueError, OSError) as exc:
+        return usage(str(exc))
+
+    req_id = submit(command, args)
+    result = wait_for(req_id, info.get("timeout_seconds", 60) + 30)
+    if result is None:
+        print(f"hostctl: no result for {req_id} yet; the broker may be busy or stopped. "
+              f"Check later with `hostctl result {req_id}`.", file=sys.stderr)
+        return 4
+    if result.get("status") == "pending":
+        print(f"hostctl: {req_id} is waiting for approval on the host. "
+              f"Check later with `hostctl result {req_id}`.", file=sys.stderr)
+        return 3
+    return report(result)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
