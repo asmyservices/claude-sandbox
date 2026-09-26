@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import yaml  # noqa: F401
 except ImportError:
+    # An active virtualenv often lacks PyYAML; the system Python usually has it.
+    system_python = "/usr/bin/python3"
+    if os.path.realpath(sys.executable) != os.path.realpath(system_python) and os.access(system_python, os.X_OK):
+        os.execv(system_python, [system_python, os.path.abspath(__file__), *sys.argv[1:]])
     sys.exit("sandbox needs PyYAML: apt install python3-yaml (or pip install --user pyyaml)")
 
 from sandboxlib.cli import main
