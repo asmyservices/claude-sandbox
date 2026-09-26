@@ -412,7 +412,7 @@ The container's Claude settings (model and permission mode) are written to
 This rebuilds the image with the newest Claude Code and recreates the
 container, which ends any open sessions. Pin a version with
 `claude_code_version` if you'd rather upgrade on purpose. Running
-`claude --upgrade` inside the container doesn't stick, because the image is
+`claude update` inside the container doesn't stick, because the image is
 rebuilt from scratch.
 
 ## Moving from a host-run Remote Control service
