@@ -122,14 +122,17 @@ def cmd_setup(cfg: Config, args: argparse.Namespace) -> int:
     if not linger_enabled():
         print("warning: lingering is off, so the broker and a rootless Docker daemon "
               "stop when you log out. Run: loginctl enable-linger")
-    print("\nNext: ./sandbox login   (one-time: log in and trust /workspace)")
+    print("\nNext: ./sandbox login   (one-time: log in, trust /workspace, run /remote-control once, /quit)")
     print("      ./sandbox up")
     return 0
 
 
 def cmd_login(cfg: Config, args: argparse.Namespace) -> int:
-    print("Starting Claude in the container. Log in, accept the trust prompt "
-          "for /workspace, then exit with /exit.")
+    print("Starting Claude in the container. In the session:\n"
+          "  1. Log in and accept the trust prompt for /workspace.\n"
+          "  2. Run /remote-control once and answer y to enable it.\n"
+          "  3. Run /quit.\n"
+          "Then start it for real with ./sandbox up.")
     return compose(cfg, "run", "--rm", "claude", "claude", check=False).returncode
 
 

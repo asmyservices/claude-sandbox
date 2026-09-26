@@ -227,11 +227,24 @@ cp config.example.yaml config.yaml
 $EDITOR config.yaml       # at least: name, and the services/projects in the actions
 ./sandbox check           # validate the config
 ./sandbox setup           # create data dirs, install the broker, build the image
-./sandbox login           # one-time: log in to Claude and accept the trust prompt for /workspace
+./sandbox login           # one-time, see below
 ./sandbox up              # start it
 ```
 
-The environment then shows up in the Claude app under the `name` you set.
+`./sandbox login` opens an interactive Claude session in the container. In
+it:
+
+1. Log in, and accept the trust prompt for `/workspace`.
+2. Run `/remote-control` once and answer `y` when asked to enable Remote
+   Control.
+3. Run `/quit`.
+
+The container runs Claude without a terminal, so it can't answer these
+prompts itself. Doing them once here saves the answers in the container's
+home directory (`paths.state`).
+
+After `./sandbox up`, the environment shows up in the Claude app under the
+`name` you set.
 Setup warns you if lingering is off. Run `loginctl enable-linger` so the
 broker and a rootless Docker daemon keep running after you log out and start
 at boot. The container restarts on its own (`restart: unless-stopped`).
@@ -342,7 +355,7 @@ get pinged, set `broker.approval_webhook_url` to a Discord webhook URL.
 |---|---|
 | `./sandbox check` | Validate `config.yaml` and print a summary. |
 | `./sandbox setup [--no-build]` | Create data directories, write generated files, install and start the broker units, build the image. Safe to run again. |
-| `./sandbox login` | Run Claude interactively in the container to log in and trust `/workspace`. |
+| `./sandbox login` | Run Claude interactively in the container to log in, trust `/workspace` and enable Remote Control. |
 | `./sandbox up` / `down` | Start / stop the container. |
 | `./sandbox restart` | Recreate the container. Ends open sessions. |
 | `./sandbox upgrade` | Rebuild with the newest Claude Code and restart. Ends open sessions. |
@@ -425,7 +438,9 @@ systemd user service:
   `systemctl --user status claude-sandbox-<name>-broker.path` and the
   service's journal. If lingering is off, user units stop when you log out.
 - **The environment doesn't appear in the app**: check `./sandbox logs`.
-  Usually it isn't logged in yet: run `./sandbox login`.
+  Usually the one-time login steps weren't finished. Run `./sandbox login`,
+  and make sure you ran `/remote-control` once before `/quit`. Then run
+  `./sandbox restart`.
 - **Files in `data/` are owned by an odd uid**: set `container.user`
   explicitly. On rootless Docker it should be `0:0`, which maps to you.
 - **Errors about memory or CPU limits on rootless Docker**: rootless Docker
